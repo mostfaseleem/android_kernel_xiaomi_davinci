@@ -523,7 +523,7 @@ void f2fs_remove_ino_entry(struct f2fs_sb_info *sbi, nid_t ino, int type)
 	__remove_ino_entry(sbi, ino, type);
 }
 
-/* mode should be APPEND_INO, UPDATE_INO or TRANS_DIR_INO */
+/* mode should be APPEND_INO or UPDATE_INO */
 bool f2fs_exist_written_data(struct f2fs_sb_info *sbi, nid_t ino, int mode)
 {
 	struct inode_management *im = &sbi->im[mode];
@@ -895,8 +895,8 @@ int f2fs_get_valid_checkpoint(struct f2fs_sb_info *sbi)
 	int i;
 	int err;
 
-	sbi->ckpt = f2fs_kvzalloc(sbi, array_size(blk_size, cp_blks),
-				  GFP_KERNEL);
+	sbi->ckpt = f2fs_kzalloc(sbi, array_size(blk_size, cp_blks),
+				 GFP_KERNEL);
 	if (!sbi->ckpt)
 		return -ENOMEM;
 	/*
@@ -1168,11 +1168,6 @@ static int block_operations(struct f2fs_sb_info *sbi)
 	};
 	int err = 0, cnt = 0;
 
-	/*
-	 * Let's flush inline_data in dirty node pages.
-	 */
-	f2fs_flush_inline_data(sbi);
-
 retry_flush_quotas:
 	f2fs_lock_all(sbi);
 	if (__need_flush_quota(sbi)) {
@@ -1258,19 +1253,14 @@ void f2fs_wait_on_all_pages(struct f2fs_sb_info *sbi, int type)
 	DEFINE_WAIT(wait);
 
 	for (;;) {
+		prepare_to_wait(&sbi->cp_wait, &wait, TASK_UNINTERRUPTIBLE);
+
 		if (!get_pages(sbi, type))
 			break;
 
 		if (unlikely(f2fs_cp_error(sbi)))
 			break;
 
-		if (type == F2FS_DIRTY_META)
-			f2fs_sync_meta_pages(sbi, META, LONG_MAX,
-							FS_CP_META_IO);
-		else if (type == F2FS_WB_CP_DATA)
-			f2fs_submit_merged_write(sbi, DATA);
-
-		prepare_to_wait(&sbi->cp_wait, &wait, TASK_UNINTERRUPTIBLE);
 		io_schedule_timeout(DEFAULT_IO_TIMEOUT);
 	}
 	finish_wait(&sbi->cp_wait, &wait);
@@ -1417,7 +1407,7 @@ static int do_checkpoint(struct f2fs_sb_info *sbi, struct cp_control *cpc)
 				curseg_alloc_type(sbi, i + CURSEG_HOT_DATA);
 	}
 
-	/* 2 cp + n data seg summary + orphan inode blocks */
+	/* 2 cp  + n data seg summary + orphan inode blocks */
 	data_sum_blocks = f2fs_npages_for_summary_flush(sbi, false);
 	spin_lock_irqsave(&sbi->cp_lock, flags);
 	if (data_sum_blocks < NR_CURSEG_DATA_TYPE)
@@ -1517,10 +1507,9 @@ static int do_checkpoint(struct f2fs_sb_info *sbi, struct cp_control *cpc)
 
 	/*
 	 * invalidate intermediate page cache borrowed from meta inode which are
-	 * used for migration of encrypted, verity or compressed inode's blocks.
+	 * used for migration of encrypted or verity inode's blocks.
 	 */
-	if (f2fs_sb_has_encrypt(sbi) || f2fs_sb_has_verity(sbi) ||
-		f2fs_sb_has_compression(sbi))
+	if (f2fs_sb_has_encrypt(sbi) || f2fs_sb_has_verity(sbi))
 		invalidate_mapping_pages(META_MAPPING(sbi),
 				MAIN_BLKADDR(sbi), MAX_BLKADDR(sbi) - 1);
 
@@ -1565,8 +1554,7 @@ int f2fs_write_checkpoint(struct f2fs_sb_info *sbi, struct cp_control *cpc)
 			return 0;
 		f2fs_warn(sbi, "Start checkpoint disabled!");
 	}
-	if (cpc->reason != CP_RESIZE)
-		mutex_lock(&sbi->cp_mutex);
+	mutex_lock(&sbi->cp_mutex);
 
 	if (!is_sbi_flag_set(sbi, SBI_IS_DIRTY) &&
 		((cpc->reason & CP_FASTBOOT) || (cpc->reason & CP_SYNC) ||
@@ -1635,8 +1623,7 @@ stop:
 	f2fs_update_time(sbi, CP_TIME);
 	trace_f2fs_write_checkpoint(sbi->sb, cpc->reason, "finish checkpoint");
 out:
-	if (cpc->reason != CP_RESIZE)
-		mutex_unlock(&sbi->cp_mutex);
+	mutex_unlock(&sbi->cp_mutex);
 	return err;
 }
 
